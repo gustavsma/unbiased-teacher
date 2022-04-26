@@ -711,9 +711,41 @@ class UBTeacherTrainer(DefaultTrainer):
         ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD,
                    test_and_save_results_student))
         ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD,
-                   test_and_save_results_teacher))
+                   test_and_save_results_teacher)),
+        ret.append(hooks.BestCheckpointer(cfg.TEST.EVAL_PERIOD, self.checkpointer, "bbox/AP"))
 
         if comm.is_main_process():
             # run writers in the end, so that evaluation metrics are written
             ret.append(hooks.PeriodicWriter(self.build_writers(), period=20))
         return ret
+
+class CustomPredictor:
+
+    def __init__(self, cfg):
+        self.cfg = cfg.clone()
+
+        Trainer = UBTeacherTrainer
+
+        model = Trainer.build_model(cfg)
+        model_teacher = Trainer.build_model(cfg)
+        ensem_ts_model = EnsembleTSModel(model_teacher, model)
+
+        DetectionCheckpointer(
+            ensem_ts_model,
+            save_dir=cfg.OUTPUT_DIR
+        ).resume_or_load(cfg.MODEL.WEIGHTS, resume=True)
+
+        model = ensem_ts_model.modelTeacher
+        self.model = model
+        
+        self.model.eval()
+
+    def __call__(self, original_image):
+        with torch.no_grad():
+            original_image = original_image[:, :, ::-1]
+            height, width = original_image.shape[:2]
+            image = original_image
+            image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+            inputs = {"image": image, "height": height, "width": width}
+            predictions = self.model([inputs])[0]
+            return predictions
